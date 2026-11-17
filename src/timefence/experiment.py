@@ -109,7 +109,8 @@ def run(out_dir: Path = config.REPORTS_DIR, frames_dir: Path = config.FRAMES_DIR
     bt_parity = parity(oot(frames["bitemporal"].values), prod.values, features)
     if bt_parity["mismatched_rows"].sum():
         raise AssertionError("Bitemporal frame differs from production replay:\n" + bt_parity.to_string())
-    log(f"Parity: bitemporal == production replay on all {len(prod.values):,} rows x {len(features)} features")
+    log(f"Parity: bitemporal == production replay on all {len(prod.values):,} rows "
+        f"x {len(features)} features")
 
     y_lab = labels.set_index("application_id")
     prod_vals = prod.values.sort_values("application_id").reset_index(drop=True)
@@ -232,7 +233,7 @@ def _chart_contamination(audit: pd.DataFrame, path: Path) -> None:
     fig, ax = plt.subplots(figsize=(9, 0.42 * len(a) + 1.3), dpi=200, facecolor=SURFACE)
     _style(ax)
     ax.barh(a["feature"], a["contaminated_pct"], color=REPORTED, height=0.62)
-    for y, (v, d) in enumerate(zip(a["contaminated_pct"], a["median_days_late"])):
+    for y, (v, d) in enumerate(zip(a["contaminated_pct"], a["median_days_late"], strict=True)):
         ax.annotate(f"{v:.1f}%  · {d:.1f} days late", (v, y), xytext=(5, 0),
                     textcoords="offset points", va="center", fontsize=9, color=INK_2)
     ax.set_xlim(0, a["contaminated_pct"].max() * 1.35)
@@ -261,7 +262,8 @@ def _write_report(summary, audits, drifts, importances, importances_real, path: 
         "Strategy": r["label"],
         "Reported Gini": f"{r['reported_gini']:.3f}",
         "Realised Gini": f"{r['realised_gini']:.3f}",
-        "Gap (95% CI)": f"{r['gini_gap']:+.3f} ({r['gini_gap_ci95'][0]:+.3f} to {r['gini_gap_ci95'][1]:+.3f})",
+        "Gap (95% CI)": (f"{r['gini_gap']:+.3f} "
+                         f"({r['gini_gap_ci95'][0]:+.3f} to {r['gini_gap_ci95'][1]:+.3f})"),
         "Brier, reported / realised": f"{r['reported_brier']:.4f} / {r['realised_brier']:.4f}",
         "Promised bad rate @80% approval": f"{100 * r['promised_bad_rate_at_80pct_approval']:.1f}%",
         "Realised bad rate, same cut-off": f"{100 * r['realised_bad_rate_at_same_cutoff']:.1f}%",

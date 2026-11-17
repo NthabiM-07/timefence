@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -32,7 +32,7 @@ def materialise(store: FeatureStore, as_of: pd.Timestamp, db_path: Path = config
     out = frame.values.drop(columns=["request_id", "decision_time"])
     meta = {"as_of": str(pd.Timestamp(as_of)), "registry_sha256": store.registry.sha256,
             "purpose": purpose, "features": json.dumps(list(frame.features)),
-            "materialised_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+            "materialised_at": datetime.now(UTC).isoformat(timespec="seconds")}
     db_path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(db_path, isolation_level=None)  # explicit transactions only
     try:

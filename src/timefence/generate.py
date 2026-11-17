@@ -152,7 +152,7 @@ def generate(n_customers: int = 10_000, seed: int = 7) -> GeneratedData:
     pay_seq = enq_seq = coll_seq = app_seq = 0
     is_card = acc_product == "card"
 
-    for m, (ms, me) in enumerate(zip(months, month_ends)):
+    for m, (ms, me) in enumerate(zip(months, month_ends, strict=True)):
         me64 = np.datetime64(me, "ns")
         s = 0.8 * s + rng.normal(0, 0.55, C)
         risk_c = 0.9 * z + s + _macro(m)
@@ -321,7 +321,7 @@ def generate(n_customers: int = 10_000, seed: int = 7) -> GeneratedData:
 
     def _cat(frames: list[pd.DataFrame], key: list[str]) -> pd.DataFrame:
         out = pd.concat(frames, ignore_index=True)
-        return out.sort_values(key + ["record_version"], kind="stable").reset_index(drop=True)
+        return out.sort_values([*key, "record_version"], kind="stable").reset_index(drop=True)
 
     return GeneratedData(
         customers=customers,

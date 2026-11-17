@@ -17,7 +17,8 @@ def enquiry(eid, at, ingested, version=1, lender="bank"):
 
 
 def value(store, strategy, decision, feature):
-    v = store.build(spine(decision), strategy, features=[feature], with_manifest=False).values[feature].iloc[0]
+    frame = store.build(spine(decision), strategy, features=[feature], with_manifest=False)
+    v = frame.values[feature].iloc[0]
     return None if pd.isna(v) else v
 
 

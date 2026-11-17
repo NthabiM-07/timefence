@@ -6,7 +6,7 @@ import json
 import platform
 import subprocess
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import duckdb
@@ -117,9 +117,27 @@ class FeatureStore:
 
     # ------------------------------------------------------------------ contracts
     def check_sources(self) -> None:
-        """Data contract: version keys unique, and no version lands before its fact."""
+        """Data contract, checked on every load. Each failure names the source and the problem.
+
+        * every column the registry relies on exists;
+        * entity, record key, version and both clocks are never NULL (a NULL
+          ``ingested_at`` would vanish from bitemporal builds but not event-time ones);
+        * (record key, version) is unique, so tie-breaking is defined;
+        * no version lands before the fact it describes.
+        """
+        ent = self.registry.entity
         for name, s in self.registry.sources.items():
             tbl = q(f"src_{name}")
+            present = {r[0] for r in self.con.execute(f"DESCRIBE {tbl}").fetchall()}
+            needed = [ent, *s.record_key, s.version_col, s.event_time, s.ingested_at]
+            absent = [c for c in dict.fromkeys(needed) if c not in present]
+            if absent:
+                raise ValueError(f"Source '{name}' ({s.path}) is missing columns {absent}")
+            checks = ", ".join(f"count(*) FILTER (WHERE {q(c)} IS NULL)" for c in dict.fromkeys(needed))
+            null_counts = self.con.execute(f"SELECT {checks} FROM {tbl}").fetchall()[0]
+            nulls = {c: n for c, n in zip(dict.fromkeys(needed), null_counts, strict=True) if n}
+            if nulls:
+                raise ValueError(f"Source '{name}': NULLs in key or clock columns {nulls}")
             cols = [*s.record_key, s.version_col]
             dup = self.con.execute(
                 f"SELECT count(*) FROM (SELECT {', '.join(map(q, cols))} FROM {tbl} "
@@ -143,6 +161,12 @@ class FeatureStore:
             raise ValueError(f"Spine is missing columns {sorted(missing)}")
         if spine[row_id].duplicated().any():
             raise ValueError(f"Spine column '{row_id}' must be unique")
+        if row_id in self.registry.features:
+            raise ValueError(f"Spine id column '{row_id}' clashes with a feature of the same name")
+        blank = [c for c in (row_id, ent, "decision_time") if spine[c].isna().any()]
+        if blank:
+            raise ValueError(f"Spine has missing values in {blank}; every row needs an id, "
+                             f"a {ent} and a decision_time")
         sp = spine[[row_id, ent, "decision_time"]].rename(columns={row_id: "__row_id"}).copy()
         sp["decision_time"] = pd.to_datetime(sp["decision_time"]).astype("datetime64[ns]")
         if strategy == "naive":
@@ -174,8 +198,9 @@ class FeatureStore:
         out = out.rename(columns={"__row_id": row_id})
         names = list(q.features)
         values = out[[row_id, self.registry.entity, "decision_time", *names]].copy()
-        lineage = out[[row_id, "decision_time", "__as_of"] + [c for c in out.columns if c.startswith(("__ing__", "__evt__"))
-                                                   and c[7:] in names]].copy()
+        lineage_cols = [c for c in out.columns
+                        if c.startswith(("__ing__", "__evt__")) and c[7:] in names]
+        lineage = out[[row_id, "decision_time", "__as_of", *lineage_cols]].copy()
         manifest = self._manifest(spine, strategy, names, purpose, values, row_id) if with_manifest else {}
         return FeatureFrame(values=values, lineage=lineage, features=tuple(names), strategy=strategy,
                             manifest=manifest)
@@ -191,7 +216,7 @@ class FeatureStore:
         except Exception:  # pragma: no cover - git is optional
             commit = None
         return {
-            "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
             "strategy": strategy,
             "purpose": purpose,
             "features": names,

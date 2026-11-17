@@ -11,7 +11,8 @@ from timefence.store import FeatureStore, frame_hash
 
 
 def test_audit_passes_for_bitemporal_and_catches_the_other_strategies(store, apps):
-    audits = {s: store.build(apps, s, with_manifest=False).audit() for s in ("naive", "event_time", "bitemporal")}
+    audits = {s: store.build(apps, s, with_manifest=False).audit()
+              for s in ("naive", "event_time", "bitemporal")}
     assert (audits["bitemporal"]["status"] == "PASS").all()
     assert audits["event_time"]["late_knowledge_rows"].sum() > 0
     assert audits["event_time"]["future_event_rows"].sum() == 0
