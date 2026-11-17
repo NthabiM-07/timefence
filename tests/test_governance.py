@@ -9,7 +9,7 @@ from conftest import REGISTRY
 from timefence import config
 from timefence.online import lookup, materialise
 from timefence.registry import PermittedUseError, RegistryError, load_registry
-from timefence.store import LabelMaturityError, attach_labels
+from timefence.store import FeatureStore, LabelMaturityError, attach_labels
 
 
 def _write(tmp_path, mutate):
@@ -102,7 +102,8 @@ def test_online_store_serves_the_offline_definition(store, tmp_path):
 
 def test_string_literals_in_derived_features_are_not_dependencies(tmp_path):
     def add(r):
-        r["features"].append({"name": "flag", "derived": "CASE WHEN enquiries_3m > 0 THEN 'enquiries_12m' END",
+        expr = "CASE WHEN enquiries_3m > 0 THEN 'enquiries_12m' END"
+        r["features"].append({"name": "flag", "derived": expr,
                               "description": "x", "owner": "o", "permitted_use": ["analytics"]})
     reg = load_registry(_write(tmp_path, add))
     assert reg.features["flag"].depends_on == ("enquiries_3m",)
@@ -131,3 +132,73 @@ def test_failed_refresh_keeps_the_previous_snapshot_serving(store, tmp_path, mon
     monkeypatch.undo()
     materialise(store, pd.Timestamp("2025-09-30 12:00"), db_path=db)  # recovers cleanly
     assert lookup("C000042", db_path=db)["as_of"] == "2025-09-30 12:00:00"
+
+
+# ------------------------------------------------------------- config mistakes fail loudly
+def _feature(r, name):
+    return next(f for f in r["features"] if f["name"] == name)
+
+
+def _rename_key(d, old, new):
+    d[new] = d.pop(old)
+
+
+@pytest.mark.parametrize("mutate, message", [
+    (lambda r: _rename_key(_feature(r, "worst_dpd_3m"), "window_days", "windows_days"),
+     r"unknown key 'windows_days' \(did you mean 'window_days'\?\)"),
+    (lambda r: r["sources"]["payments"].update(record_key="payment_id"),
+     "record_key must be a non-empty list"),
+    (lambda r: _feature(r, "worst_dpd_12m").update(permitted_use="credit_decisioning"),
+     "permitted_use must be a non-empty list"),
+    (lambda r: _feature(r, "worst_dpd_12m").update(name="decision_time"), "reserved"),
+    (lambda r: _feature(r, "worst_dpd_12m").update(name="customer_id"), "reserved"),
+    (lambda r: _feature(r, "worst_dpd_3m").update(default="zero"), "default must be a number"),
+    (lambda r: _feature(r, "enquiries_3m").update(where="1=1; DROP TABLE x"), "may not contain ';'"),
+    (lambda r: _feature(r, "reversal_rate_6m").update(source="payments"), "unknown key 'source'"),
+    (lambda r: r["sources"]["payments"].update(event_tme="paid_at"), "did you mean 'event_time'"),
+])
+def test_config_mistakes_are_rejected_with_a_clear_message(tmp_path, mutate, message):
+    with pytest.raises(RegistryError, match=message):
+        load_registry(_write(tmp_path, mutate))
+
+
+def _copy_raw(raw_dir, dest):
+    for f in raw_dir.glob("*.parquet"):
+        (dest / f.name).write_bytes(f.read_bytes())
+
+
+def test_source_missing_a_declared_column_is_named(raw_dir, tmp_path):
+    _copy_raw(raw_dir, tmp_path)
+    enq = pd.read_parquet(tmp_path / "bureau_enquiries.parquet").drop(columns="ingested_at")
+    enq.to_parquet(tmp_path / "bureau_enquiries.parquet", index=False)
+    with pytest.raises(ValueError, match=r"bureau_enquiries.*missing columns \['ingested_at'\]"):
+        FeatureStore(REGISTRY, tmp_path)
+
+
+def test_null_clock_values_are_rejected(raw_dir, tmp_path):
+    """A NULL ingested_at would vanish from bitemporal builds but leak into event-time ones."""
+    _copy_raw(raw_dir, tmp_path)
+    pays = pd.read_parquet(tmp_path / "payments.parquet")
+    pays.loc[pays.index[:3], "ingested_at"] = pd.NaT
+    pays.to_parquet(tmp_path / "payments.parquet", index=False)
+    with pytest.raises(ValueError, match=r"NULLs in key or clock columns.*'ingested_at': 3"):
+        FeatureStore(REGISTRY, tmp_path)
+
+
+def test_spine_rows_need_an_id_entity_and_decision_time(store, apps):
+    bad = apps.head(5).copy()
+    bad.loc[bad.index[0], "decision_time"] = pd.NaT
+    with pytest.raises(ValueError, match="missing values in \\['decision_time'\\]"):
+        store.build(bad, "bitemporal", with_manifest=False)
+    clash = apps.head(5).rename(columns={"application_id": "enquiries_3m"})
+    with pytest.raises(ValueError, match="clashes with a feature"):
+        store.build(clash, "bitemporal", row_id="enquiries_3m", with_manifest=False)
+
+
+def test_cli_reports_its_version(capsys):
+    from timefence import __version__
+    from timefence.cli import main
+    with pytest.raises(SystemExit) as exit_info:
+        main(["--version"])
+    assert exit_info.value.code == 0
+    assert __version__ in capsys.readouterr().out

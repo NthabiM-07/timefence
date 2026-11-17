@@ -1,13 +1,29 @@
-name: ci
+name: tests
 
 on:
   push:
+    branches: [main]
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install "ruff>=0.6"
+      - run: ruff check src tests
+
   test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
     steps:
@@ -15,11 +31,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - name: Install
         run: pip install -e ".[dev]"
       - name: Unit and property tests
         run: pytest
-      - name: Leakage gate (smoke run on a small portfolio)
+      - name: Leakage gate
         run: |
           timefence generate --customers 2000 --seed 1
           timefence build --strategy bitemporal
@@ -29,3 +47,23 @@ jobs:
           if timefence audit data/frames/event_time > /dev/null; then
             echo "Audit failed to detect leakage in the event-time frame" && exit 1
           fi
+
+  experiment:
+    # End to end: generate, build all strategies, replay production, train, report.
+    # Fails if the bitemporal frame ever differs from the production replay.
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: pip install -e .
+      - run: timefence generate --customers 3000 --seed 7
+      - run: timefence experiment
+      - uses: actions/upload-artifact@v4
+        with:
+          name: leakage-report
+          path: reports/

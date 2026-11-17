@@ -17,11 +17,12 @@ from pathlib import Path
 
 import pandas as pd
 
-from . import config
+from . import __version__, config
 
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="timefence", description="Point-in-time correct credit feature store")
+    p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     g = sub.add_parser("generate", help="Generate synthetic credit data")

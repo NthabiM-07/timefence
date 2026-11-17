@@ -1,5 +1,9 @@
 # timefence
 
+[![tests](https://github.com/NthabiM-07/timefence/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/NthabiM-07/timefence/actions/workflows/ci.yml)
+![Python 3.11 | 3.12 | 3.13](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
 **A point-in-time correct credit feature store that stops future data leaking into model training.**
 
 Credit models are trained on what happened, but they are used on what was *known*. Those are different
@@ -148,7 +152,8 @@ agg_account_snapshots AS (
 | One definition, offline and online | Online store is materialised from the same compiled query | `test_online_store_serves_the_offline_definition` |
 | A failed online refresh never half-publishes | New snapshot staged beside the live one, then features and metadata swapped in one transaction | `test_failed_refresh_keeps_the_previous_snapshot_serving` |
 | Odd names cannot break or inject SQL | Every identifier and literal goes through one quoting module (`_sql.py`) | `test_paths_and_identifiers_are_quoted` |
-| Source contracts | Duplicate version keys, or rows landing before they happened, fail the load | `test_duplicate_version_keys_are_rejected` |
+| Source contracts | Missing columns, NULL keys or clocks, duplicate version keys, and rows landing before they happened all fail the load | `test_duplicate_version_keys_are_rejected`, `test_null_clock_values_are_rejected` |
+| Config mistakes fail loudly | Misspelt keys (with a "did you mean" hint), a string where a list belongs, reserved names and non-numeric defaults are rejected | `test_config_mistakes_are_rejected_with_a_clear_message` |
 
 One finding came out of the reproducibility test. DuckDB sums floats in parallel, so two identical builds
 differed in the 16th significant digit. That is harmless for a model, but it breaks any claim that a
@@ -158,11 +163,12 @@ training set can be reproduced and verified by hash. Sums and averages now accum
 ## Quickstart
 
 ```bash
-git clone <this repo> && cd timefence
+git clone https://github.com/NthabiM-07/timefence && cd timefence
 python -m venv .venv && source .venv/bin/activate
 make install          # pip install -e ".[dev]"
 make demo             # generate data, run the experiment, materialise online store, audit frames
-make test             # 30 tests, ~20 seconds
+make test             # 43 tests, ~20 seconds
+make lint             # ruff
 ```
 
 `make demo` takes about a minute on a laptop. Individual commands:
@@ -179,6 +185,13 @@ timefence lookup C000042
 ```
 
 Use `timefence audit` as a gate in a training pipeline: a frame that fails it never reaches a model.
+
+CI runs three jobs on every push and pull request:
+- **lint:** `ruff`.
+- **test:** the test suite on Python 3.11, 3.12 and 3.13, plus the leakage gate. The gate must pass the
+  bitemporal frame and reject the event-time one.
+- **experiment:** the full experiment end to end on a small portfolio. It fails if the bitemporal frame
+  ever differs from the production replay, and uploads the leakage report as a build artifact.
 
 ## Defining a feature
 
@@ -199,7 +212,12 @@ Use `timefence audit` as a gate in a training pipeline: a frame that fails it ne
 ```
 
 The registry is validated on load. It rejects unknown sources, duplicate names, cycles between derived
-features, non-positive windows and missing governance metadata. The registry's sha256 goes into every
+features, non-positive windows and missing governance metadata. It also rejects mistakes that would
+otherwise fail silently:
+- a misspelt key such as `windows_days`, which would quietly drop the window. The error suggests the
+  right key.
+- a bare string where a list belongs. Written as `permitted_use: analytics`, it would otherwise be read
+  as a list of single letters. The registry's sha256 goes into every
 manifest and into the online store, and `lookup` refuses to serve features built from a different
 registry.
 
@@ -217,7 +235,7 @@ src/timefence/
   online.py                     SQLite online store
   experiment.py                 reported-vs-realised experiment, charts, report
   cli.py                        `timefence` command
-tests/                          30 tests: semantics, leakage, governance
+tests/                          43 tests: semantics, leakage, governance
 docs/adr/                       design decisions
 docs/data_dictionary.md         sources, both clocks, arrival patterns
 reports/                        generated results (committed so the README renders)

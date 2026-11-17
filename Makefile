@@ -1,4 +1,4 @@
-.PHONY: install data experiment demo test audit clean
+.PHONY: install data experiment demo test lint clean
 
 install:
 	pip install -e ".[dev]"
@@ -17,6 +17,9 @@ demo: data experiment
 
 test:
 	pytest
+
+lint:
+	ruff check src tests
 
 clean:
 	rm -rf data .pytest_cache
