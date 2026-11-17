@@ -109,3 +109,29 @@ def test_duplicate_version_keys_are_rejected(raw_dir, tmp_path):
     pd.concat([enq, enq.head(1)]).to_parquet(tmp_path / "bureau_enquiries.parquet", index=False)
     with pytest.raises(ValueError, match="duplicate"):
         FeatureStore(REGISTRY, tmp_path)
+
+
+def test_replay_of_an_empty_spine_returns_an_empty_frame(store, apps):
+    out = replay(store, apps.iloc[0:0])
+    assert out.values.empty and out.manifest["knowledge_epochs"] == 0
+    assert list(out.features) == [f.name for f in store.registry.select(purpose="credit_decisioning")]
+
+
+def test_paths_and_identifiers_are_quoted(raw_dir, apps, tmp_path):
+    odd = tmp_path / "Mo'Nique's data"
+    odd.mkdir()
+    for f in raw_dir.glob("*.parquet"):
+        (odd / f.name).write_bytes(f.read_bytes())
+    a = FeatureStore(REGISTRY, odd).build(apps.head(200), "bitemporal", with_manifest=False).values
+    b = FeatureStore(REGISTRY, raw_dir).build(apps.head(200), "bitemporal", with_manifest=False).values
+    pd.testing.assert_frame_equal(a, b)
+
+
+def test_lazy_parquet_views_give_identical_results(raw_dir, store, apps):
+    lazy = FeatureStore(REGISTRY, raw_dir, in_memory=False)
+    a = lazy.build(apps, "bitemporal", with_manifest=False).values
+    assert frame_hash(a) == frame_hash(store.build(apps, "bitemporal", with_manifest=False).values)
+    month = apps[(apps["decision_time"] >= "2024-05-01") & (apps["decision_time"] < "2024-06-01")]
+    feats = [f.name for f in store.registry.select(purpose="credit_decisioning")]
+    offline = store.build(month, "bitemporal", with_manifest=False).values
+    assert parity(replay(lazy, month).values, offline, feats)["mismatched_rows"].sum() == 0

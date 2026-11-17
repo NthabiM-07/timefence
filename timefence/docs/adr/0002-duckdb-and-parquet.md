@@ -31,5 +31,8 @@ the same way that the replay here checks the bitemporal filter.
 
 - A full experiment (20,000 applications, 1.7 million source rows, 306 replayed knowledge epochs) runs in
   about a minute on one machine.
-- Sources are loaded into memory once per store. Past a few tens of millions of rows, swap the
-  `CREATE TEMP TABLE` for a view over Parquet, or move to a distributed engine. The SQL does not change.
+- By default, sources are loaded into memory once per store, because the replay re-truncates every source
+  for each knowledge epoch. `FeatureStore(in_memory=False)` registers lazy Parquet views instead, for
+  sources larger than RAM. Results are identical (tested). Builds take the same time, but the replay is
+  about 40% slower: 10.4s against 7.5s for 1,500 applications. Past that, move to a distributed engine;
+  the SQL does not change.

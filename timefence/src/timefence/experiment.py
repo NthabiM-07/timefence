@@ -8,6 +8,11 @@ document ("reported").
 Then we score the same 2024 applications with the features production would
 really have served, from the physical replay ("realised"). The gap between the
 two is the leak, expressed in the currency a credit committee cares about.
+
+Timeline: the model is developed in January 2026 with every vintage whose
+12-month window had closed (train 2022-2023, out-of-time 2024), the usual
+scorecard design. A robustness check repeats the comparison training only on
+vintages matured by 1 January 2024, as if the model had gone live that day.
 """
 from __future__ import annotations
 
@@ -22,7 +27,7 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.inspection import permutation_importance
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import brier_score_loss, roc_auc_score
 
 from . import config
 from .replay import parity, replay
@@ -110,7 +115,7 @@ def run(out_dir: Path = config.REPORTS_DIR, frames_dir: Path = config.FRAMES_DIR
     prod_vals = prod.values.sort_values("application_id").reset_index(drop=True)
     y_oot = y_lab.loc[prod_vals["application_id"], "bad"].values
 
-    results, audits, drifts, importances = {}, {}, {}, {}
+    results, audits, drifts, importances, importances_real = {}, {}, {}, {}, {}
     for s, fr in frames.items():
         train = attach_labels(fr, labels, training_cutoff=config.DATA_END)
         train = train[train["application_id"].isin(set(spine.loc[is_train, "application_id"]))]
@@ -132,6 +137,8 @@ def run(out_dir: Path = config.REPORTS_DIR, frames_dir: Path = config.FRAMES_DIR
             "promised_bad_rate_at_80pct_approval": round(_approved_bad_rate(y_oot, p_rep, cutoff), 4),
             "realised_bad_rate_at_same_cutoff": round(_approved_bad_rate(y_oot, p_real, cutoff), 4),
             "realised_approval_rate_at_same_cutoff": round(float((p_real <= cutoff).mean()), 4),
+            "reported_brier": round(float(brier_score_loss(y_oot, p_rep)), 4),
+            "realised_brier": round(float(brier_score_loss(y_oot, p_real)), 4),
             "mean_predicted_pd_reported": round(float(p_rep.mean()), 4),
             "mean_predicted_pd_realised": round(float(p_real.mean()), 4),
             "oot_bad_rate": round(float(y_oot.mean()), 4),
@@ -140,10 +147,21 @@ def run(out_dir: Path = config.REPORTS_DIR, frames_dir: Path = config.FRAMES_DIR
         results[s]["gini_gap"] = round(results[s]["reported_gini"] - results[s]["realised_gini"], 4)
         audits[s] = fr.audit()
         drifts[s] = parity(rep, prod_vals, features)
-        pi = permutation_importance(model, rep[features], y_oot, scoring="roc_auc", n_repeats=5,
-                                    random_state=0)
-        importances[s] = (pd.Series(pi.importances_mean, index=features).sort_values(ascending=False)
-                          .head(5).round(4))
+        for store_in, X in ((importances, rep), (importances_real, prod_vals)):
+            pi = permutation_importance(model, X[features], y_oot, scoring="roc_auc", n_repeats=5,
+                                        random_state=0)
+            store_in[s] = (pd.Series(pi.importances_mean, index=features).sort_values(ascending=False)
+                           .head(5).round(4))
+
+        # Robustness: train only on vintages whose labels had matured by the OOT start.
+        strict = attach_labels(fr, labels, training_cutoff=config.OOT_START, drop_immature=True)
+        strict = strict[strict["application_id"].isin(set(spine.loc[is_train, "application_id"]))]
+        m2 = _model().fit(strict[features], strict["bad"])
+        g_rep2 = gini(y_oot, m2.predict_proba(rep[features])[:, 1])
+        g_real2 = gini(y_oot, m2.predict_proba(prod_vals[features])[:, 1])
+        results[s]["strict_vintage"] = {
+            "train_rows": len(strict), "reported_gini": round(g_rep2, 4),
+            "realised_gini": round(g_real2, 4), "gini_gap": round(g_rep2 - g_real2, 4)}
         r = results[s]
         log(f"{s:<10} reported Gini {r['reported_gini']:.3f} | realised {r['realised_gini']:.3f} | "
             f"gap {r['gini_gap']:+.3f}")
@@ -156,11 +174,12 @@ def run(out_dir: Path = config.REPORTS_DIR, frames_dir: Path = config.FRAMES_DIR
         "parity_bitemporal_vs_replay_mismatches": int(bt_parity["mismatched_rows"].sum()),
         "features": features, "results": results,
         "top_features": {s: v.to_dict() for s, v in importances.items()},
+        "top_features_realised": {s: v.to_dict() for s, v in importances_real.items()},
     }
     (out_dir / "results.json").write_text(json.dumps(summary, indent=2))
     _chart_gini(results, out_dir / "gini_reported_vs_realised.png")
     _chart_contamination(audits["event_time"], out_dir / "event_time_contamination.png")
-    _write_report(summary, audits, drifts, importances, out_dir / "leakage_report.md")
+    _write_report(summary, audits, drifts, importances, importances_real, out_dir / "leakage_report.md")
     log(f"Wrote {out_dir / 'leakage_report.md'}")
     return summary
 
@@ -236,13 +255,14 @@ def _md_table(df: pd.DataFrame) -> str:
     return "\n".join(lines)
 
 
-def _write_report(summary, audits, drifts, importances, path: Path) -> None:
+def _write_report(summary, audits, drifts, importances, importances_real, path: Path) -> None:
     res = summary["results"]
     headline = pd.DataFrame([{
         "Strategy": r["label"],
         "Reported Gini": f"{r['reported_gini']:.3f}",
         "Realised Gini": f"{r['realised_gini']:.3f}",
         "Gap (95% CI)": f"{r['gini_gap']:+.3f} ({r['gini_gap_ci95'][0]:+.3f} to {r['gini_gap_ci95'][1]:+.3f})",
+        "Brier, reported / realised": f"{r['reported_brier']:.4f} / {r['realised_brier']:.4f}",
         "Promised bad rate @80% approval": f"{100 * r['promised_bad_rate_at_80pct_approval']:.1f}%",
         "Realised bad rate, same cut-off": f"{100 * r['realised_bad_rate_at_same_cutoff']:.1f}%",
         "Audit": r["audit_status"],
@@ -266,6 +286,16 @@ def _write_report(summary, audits, drifts, importances, path: Path) -> None:
         _md_table(headline),
         "",
         "![Reported vs realised Gini](gini_reported_vs_realised.png)",
+        "",
+        "### Robustness: train only on vintages matured by 1 January 2024",
+        "",
+        "As if the model had gone live on the first day of the test year (fewer training rows).",
+        "",
+        _md_table(pd.DataFrame([{
+            "Strategy": r["label"], "Train rows": f"{r['strict_vintage']['train_rows']:,}",
+            "Reported Gini": f"{r['strict_vintage']['reported_gini']:.3f}",
+            "Realised Gini": f"{r['strict_vintage']['realised_gini']:.3f}",
+            "Gap": f"{r['strict_vintage']['gini_gap']:+.3f}"} for r in res.values()])),
         "",
         "## Leakage audit: event-time PIT join (all applications)",
         "",
@@ -294,7 +324,12 @@ def _write_report(summary, audits, drifts, importances, path: Path) -> None:
         "## What each model leaned on (permutation importance, top 5, out-of-time)",
         "",
     ]
+    parts.insert(len(parts) - 1, "Measured on the validation frame (what the model was shown) and on the "
+                                  "production replay (what it was actually fed).\n")
     for s, imp in importances.items():
-        parts.append(f"**{STRATEGY_LABELS[s]}:** " + ", ".join(f"`{k}` ({v:.3f})" for k, v in imp.items()))
+        parts.append(f"**{STRATEGY_LABELS[s]}**")
+        parts.append("- Validation frame: " + ", ".join(f"`{k}` ({v:.3f})" for k, v in imp.items()))
+        parts.append("- Production replay: " + ", ".join(
+            f"`{k}` ({v:.3f})" for k, v in importances_real[s].items()))
         parts.append("")
     path.write_text("\n".join(parts))

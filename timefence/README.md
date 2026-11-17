@@ -34,7 +34,14 @@ Three things stand out:
   decision time. The event-time model ranks `collections_referrals_12m` as its third most important input.
   That is the back-dated referral that has not landed yet.
 - **For the bitemporal join, "reported" and "realised" are identical, not just close.** The replay
-  matched every one of 7,075 rows across 16 features exactly.
+  matched every one of 7,075 rows across 16 features exactly. Calibration tells the same story: the naive
+  model's Brier score degrades from 0.076 to 0.091 in production, and the bitemporal model's stays at 0.080.
+
+**Robustness.** The model is developed in January 2026 with every vintage whose 12-month window had
+closed: train on 2022-2023, validate out-of-time on 2024. That is the usual scorecard design. A stricter
+design trains only on vintages matured by 1 January 2024, as if the model had gone live that day. This
+halves the training set to 5,707 rows, and the gaps hold: 15.4 points for naive, 3.1 for event-time and
+0.0 for bitemporal.
 
 All numbers come from `reports/results.json`. The full report is in [reports/leakage_report.md](reports/leakage_report.md).
 The data is synthetic (see [what is synthetic](#what-is-synthetic-and-what-is-not)), so the figures show
@@ -139,6 +146,8 @@ agg_account_snapshots AS (
 | Features are only used for approved purposes | `permitted_use` is mandatory; `province` is analytics-only (proxy risk) | `test_permitted_use_is_enforced` |
 | No label is used before its window closes | `attach_labels` refuses immature labels | `test_label_maturity_guard` |
 | One definition, offline and online | Online store is materialised from the same compiled query | `test_online_store_serves_the_offline_definition` |
+| A failed online refresh never half-publishes | New snapshot staged beside the live one, then features and metadata swapped in one transaction | `test_failed_refresh_keeps_the_previous_snapshot_serving` |
+| Odd names cannot break or inject SQL | Every identifier and literal goes through one quoting module (`_sql.py`) | `test_paths_and_identifiers_are_quoted` |
 | Source contracts | Duplicate version keys, or rows landing before they happened, fail the load | `test_duplicate_version_keys_are_rejected` |
 
 One finding came out of the reproducibility test. DuckDB sums floats in parallel, so two identical builds
@@ -153,7 +162,7 @@ git clone <this repo> && cd timefence
 python -m venv .venv && source .venv/bin/activate
 make install          # pip install -e ".[dev]"
 make demo             # generate data, run the experiment, materialise online store, audit frames
-make test             # 24 tests, ~10 seconds
+make test             # 30 tests, ~20 seconds
 ```
 
 `make demo` takes about a minute on a laptop. Individual commands:
@@ -202,12 +211,13 @@ src/timefence/
   generate.py                   synthetic data with realistic arrival behaviour
   registry.py                   registry loading, validation, permitted use
   compiler.py                   registry -> DuckDB SQL (naive / event_time / bitemporal)
+  _sql.py                       identifier and literal quoting used by every query
   store.py                      build frames, audit, manifests, label maturity guard
   replay.py                     production replay by physical truncation; parity check
   online.py                     SQLite online store
   experiment.py                 reported-vs-realised experiment, charts, report
   cli.py                        `timefence` command
-tests/                          24 tests: semantics, leakage, governance
+tests/                          30 tests: semantics, leakage, governance
 docs/adr/                       design decisions
 docs/data_dictionary.md         sources, both clocks, arrival patterns
 reports/                        generated results (committed so the README renders)
@@ -249,6 +259,10 @@ Known simplifications:
 - Bureau data is consumed only from monthly files. A lender that pulls a live bureau report at
   application would declare that source with a near-zero landing lag, and the same machinery applies.
 - DuckDB runs on a single node, and the online store is a SQLite table, not a low-latency service.
+  For sources larger than RAM, `FeatureStore(in_memory=False)` reads lazy Parquet views and gives
+  identical results, with a slower replay.
+- With the default design, training outcomes for late-2023 applications overlap the 2024 test year. That
+  affects absolute Gini for all three strategies alike, not the gap between them (see Robustness).
 
 ## Roadmap
 
