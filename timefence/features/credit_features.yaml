@@ -1,0 +1,187 @@
+# Feature registry: the single source of truth for every credit feature.
+#
+# Sources declare BOTH clocks. `event_time` is when the fact was true;
+# `ingested_at` is when the warehouse first held it. `record_key` identifies one
+# real-world fact across its versions (a restated snapshot keeps its key).
+# `version_col` breaks ties deterministically when two versions land in the
+# same batch.
+#
+# Feature columns are SQL scalar expressions over the source row. `__as_of`
+# (the moment the feature is evaluated at) is available to every expression.
+
+entity: customer_id
+
+sources:
+  customers:
+    path: customers.parquet
+    event_time: onboarded_at
+    ingested_at: ingested_at
+    record_key: [customer_id]
+    version_col: record_version
+  account_snapshots:
+    path: account_snapshots.parquet
+    event_time: snapshot_at
+    ingested_at: ingested_at
+    record_key: [account_id, snapshot_at]
+    version_col: record_version
+  payments:
+    path: payments.parquet
+    event_time: paid_at
+    ingested_at: ingested_at
+    record_key: [payment_id]
+    version_col: record_version
+  bureau_enquiries:
+    path: bureau_enquiries.parquet
+    event_time: enquired_at
+    ingested_at: ingested_at
+    record_key: [enquiry_id]
+    version_col: record_version
+  collections:
+    path: collections.parquet
+    event_time: effective_at
+    ingested_at: ingested_at
+    record_key: [referral_id]
+    version_col: record_version
+
+defaults: &decisioning
+  owner: credit-risk-features
+  permitted_use: [credit_decisioning, model_development, analytics]
+
+features:
+  # ---------------------------------------------------------------- arrears
+  - name: worst_dpd_1m
+    source: account_snapshots
+    agg: max
+    column: dpd
+    window_days: 31
+    description: Worst days-past-due across all accounts at the latest month-end.
+    <<: *decisioning
+  - name: worst_dpd_3m
+    source: account_snapshots
+    agg: max
+    column: dpd
+    window_days: 92
+    default: 0
+    description: Worst days-past-due across all accounts over the last 3 month-ends.
+    <<: *decisioning
+  - name: worst_dpd_12m
+    source: account_snapshots
+    agg: max
+    column: dpd
+    window_days: 366
+    default: 0
+    description: Worst days-past-due across all accounts over the last 12 month-ends.
+    <<: *decisioning
+  - name: months_in_arrears_12m
+    source: account_snapshots
+    agg: count
+    column: "1"
+    where: dpd > 0
+    window_days: 366
+    default: 0
+    description: Account-months in arrears (DPD > 0) over the last 12 month-ends.
+    <<: *decisioning
+  - name: card_utilisation_3m
+    source: account_snapshots
+    agg: avg
+    column: balance / nullif(credit_limit, 0)
+    where: product = 'card'
+    window_days: 92
+    description: Average credit-card utilisation over the last 3 month-ends.
+    <<: *decisioning
+
+  # ---------------------------------------------------------------- payments
+  - name: payments_cleared_6m
+    source: payments
+    agg: count
+    column: "1"
+    where: status = 'cleared'
+    window_days: 183
+    default: 0
+    description: Payments that cleared in the last 6 months.
+    <<: *decisioning
+  - name: payments_reversed_6m
+    source: payments
+    agg: count
+    column: "1"
+    where: status = 'reversed'
+    window_days: 183
+    default: 0
+    description: Debit orders reversed (bounced) in the last 6 months.
+    <<: *decisioning
+  - name: payment_to_due_ratio_3m
+    source: payments
+    agg: avg
+    column: amount_paid / nullif(amount_due, 0)
+    where: status = 'cleared'
+    window_days: 92
+    description: Average amount paid as a multiple of the amount due (cleared payments).
+    <<: *decisioning
+
+  # ---------------------------------------------------------------- bureau
+  - name: enquiries_3m
+    source: bureau_enquiries
+    agg: count
+    column: "1"
+    window_days: 92
+    default: 0
+    description: Credit enquiries at other lenders in the last 3 months.
+    <<: *decisioning
+  - name: enquiries_12m
+    source: bureau_enquiries
+    agg: count
+    column: "1"
+    window_days: 366
+    default: 0
+    description: Credit enquiries at other lenders in the last 12 months.
+    <<: *decisioning
+  - name: microlender_enquiries_6m
+    source: bureau_enquiries
+    agg: count
+    column: "1"
+    where: lender_type = 'micro_lender'
+    window_days: 183
+    default: 0
+    description: Enquiries from micro-lenders in the last 6 months.
+    <<: *decisioning
+
+  # ---------------------------------------------------------------- collections
+  - name: collections_referrals_12m
+    source: collections
+    agg: count
+    column: "1"
+    window_days: 366
+    default: 0
+    description: Collections referrals with an effective date in the last 12 months.
+    <<: *decisioning
+
+  # ---------------------------------------------------------------- customer
+  - name: months_on_book
+    source: customers
+    agg: max
+    column: date_diff('month', onboarded_at, __as_of)
+    description: Whole months since the customer was onboarded.
+    <<: *decisioning
+  - name: income_band
+    source: customers
+    agg: max
+    column: income_band
+    description: Declared income band (1 = lowest, 5 = highest).
+    <<: *decisioning
+  - name: province
+    source: customers
+    agg: max
+    column: province
+    description: Province of residence. Can act as a proxy for protected characteristics.
+    owner: credit-risk-features
+    permitted_use: [analytics]
+
+  # ---------------------------------------------------------------- derived
+  - name: reversal_rate_6m
+    derived: payments_reversed_6m / nullif(payments_cleared_6m + payments_reversed_6m, 0)
+    description: Share of the last 6 months' debit orders that were reversed.
+    <<: *decisioning
+  - name: enquiry_acceleration
+    derived: enquiries_3m / nullif(enquiries_12m, 0)
+    description: Share of the year's enquiries that fell in the last 3 months.
+    <<: *decisioning

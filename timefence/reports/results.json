@@ -1,0 +1,108 @@
+{
+  "spine_rows": 19261,
+  "excluded_in_default": 1055,
+  "train_rows": 12186,
+  "oot_rows": 7075,
+  "knowledge_epochs_replayed": 306,
+  "parity_bitemporal_vs_replay_mismatches": 0,
+  "features": [
+    "worst_dpd_1m",
+    "worst_dpd_3m",
+    "worst_dpd_12m",
+    "months_in_arrears_12m",
+    "card_utilisation_3m",
+    "payments_cleared_6m",
+    "payments_reversed_6m",
+    "payment_to_due_ratio_3m",
+    "enquiries_3m",
+    "enquiries_12m",
+    "microlender_enquiries_6m",
+    "collections_referrals_12m",
+    "months_on_book",
+    "income_band",
+    "reversal_rate_6m",
+    "enquiry_acceleration"
+  ],
+  "results": {
+    "naive": {
+      "label": "Naive (current-state join)",
+      "train_rows": 12186,
+      "oot_rows": 7075,
+      "reported_gini": 0.6874,
+      "realised_gini": 0.493,
+      "gini_gap_ci95": [
+        0.158,
+        0.2271
+      ],
+      "promised_bad_rate_at_80pct_approval": 0.047,
+      "realised_bad_rate_at_same_cutoff": 0.0655,
+      "realised_approval_rate_at_same_cutoff": 0.7634,
+      "mean_predicted_pd_reported": 0.1094,
+      "mean_predicted_pd_realised": 0.1219,
+      "oot_bad_rate": 0.1047,
+      "audit_status": "FAIL",
+      "gini_gap": 0.1944
+    },
+    "event_time": {
+      "label": "Event-time PIT join",
+      "train_rows": 12186,
+      "oot_rows": 7075,
+      "reported_gini": 0.6335,
+      "realised_gini": 0.5967,
+      "gini_gap_ci95": [
+        0.0235,
+        0.0507
+      ],
+      "promised_bad_rate_at_80pct_approval": 0.0491,
+      "realised_bad_rate_at_same_cutoff": 0.0585,
+      "realised_approval_rate_at_same_cutoff": 0.8305,
+      "mean_predicted_pd_reported": 0.1212,
+      "mean_predicted_pd_realised": 0.1055,
+      "oot_bad_rate": 0.1047,
+      "audit_status": "FAIL",
+      "gini_gap": 0.0368
+    },
+    "bitemporal": {
+      "label": "Bitemporal PIT join (timefence)",
+      "train_rows": 12186,
+      "oot_rows": 7075,
+      "reported_gini": 0.609,
+      "realised_gini": 0.609,
+      "gini_gap_ci95": [
+        0.0,
+        0.0
+      ],
+      "promised_bad_rate_at_80pct_approval": 0.0549,
+      "realised_bad_rate_at_same_cutoff": 0.0549,
+      "realised_approval_rate_at_same_cutoff": 0.8,
+      "mean_predicted_pd_reported": 0.1216,
+      "mean_predicted_pd_realised": 0.1216,
+      "oot_bad_rate": 0.1047,
+      "audit_status": "PASS",
+      "gini_gap": 0.0
+    }
+  },
+  "top_features": {
+    "naive": {
+      "card_utilisation_3m": 0.167,
+      "worst_dpd_12m": 0.0491,
+      "income_band": 0.015,
+      "months_in_arrears_12m": 0.0127,
+      "enquiries_12m": 0.0087
+    },
+    "event_time": {
+      "payment_to_due_ratio_3m": 0.0575,
+      "card_utilisation_3m": 0.0475,
+      "collections_referrals_12m": 0.0416,
+      "worst_dpd_1m": 0.0278,
+      "income_band": 0.0138
+    },
+    "bitemporal": {
+      "card_utilisation_3m": 0.0672,
+      "payment_to_due_ratio_3m": 0.0649,
+      "worst_dpd_1m": 0.0318,
+      "income_band": 0.0123,
+      "worst_dpd_12m": 0.0076
+    }
+  }
+}
