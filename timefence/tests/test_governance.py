@@ -98,3 +98,36 @@ def test_online_store_serves_the_offline_definition(store, tmp_path):
         assert (pd.isna(a) and pd.isna(b)) or a == pytest.approx(b), f
     with pytest.raises(RuntimeError):
         lookup(cust, db_path=db, expected_registry_sha256="0" * 64)
+
+
+def test_string_literals_in_derived_features_are_not_dependencies(tmp_path):
+    def add(r):
+        r["features"].append({"name": "flag", "derived": "CASE WHEN enquiries_3m > 0 THEN 'enquiries_12m' END",
+                              "description": "x", "owner": "o", "permitted_use": ["analytics"]})
+    reg = load_registry(_write(tmp_path, add))
+    assert reg.features["flag"].depends_on == ("enquiries_3m",)
+
+
+def test_online_store_can_be_refreshed_repeatedly(store, tmp_path):
+    db = tmp_path / "online.sqlite"
+    for as_of in ("2025-03-31 12:00", "2025-06-30 12:00", "2025-09-30 12:00"):
+        materialise(store, pd.Timestamp(as_of), db_path=db)
+        assert lookup("C000042", db_path=db)["as_of"] == str(pd.Timestamp(as_of))
+
+
+def test_failed_refresh_keeps_the_previous_snapshot_serving(store, tmp_path, monkeypatch):
+    from timefence import online
+    db = tmp_path / "online.sqlite"
+    materialise(store, pd.Timestamp("2025-03-31 12:00"), db_path=db)
+    before = lookup("C000042", db_path=db)
+
+    def boom():
+        raise RuntimeError("simulated crash after staging")
+
+    monkeypatch.setattr(online, "_before_swap", boom)
+    with pytest.raises(RuntimeError, match="simulated"):
+        materialise(store, pd.Timestamp("2025-09-30 12:00"), db_path=db)
+    assert lookup("C000042", db_path=db) == before
+    monkeypatch.undo()
+    materialise(store, pd.Timestamp("2025-09-30 12:00"), db_path=db)  # recovers cleanly
+    assert lookup("C000042", db_path=db)["as_of"] == "2025-09-30 12:00:00"

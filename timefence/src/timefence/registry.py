@@ -11,6 +11,7 @@ import yaml
 
 AGGS = {"count", "sum", "max", "min", "avg"}
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_STR_LITERAL = re.compile(r"'(?:''|[^'])*'")
 
 
 class RegistryError(ValueError):
@@ -130,7 +131,9 @@ def load_registry(path: str | Path) -> Registry:
         common = dict(name=name, description=f["description"], owner=f["owner"],
                       permitted_use=tuple(f["permitted_use"]))
         if "derived" in f:
-            deps = tuple(t for t in dict.fromkeys(_IDENT.findall(f["derived"])) if t in names)
+            # Strip string literals first: `CASE WHEN x = 'enquiries_3m'` is not a dependency.
+            tokens = _IDENT.findall(_STR_LITERAL.sub(" ", str(f["derived"])))
+            deps = tuple(t for t in dict.fromkeys(tokens) if t in names)
             if not deps:
                 raise RegistryError(f"Derived feature '{name}' references no other feature")
             features[name] = Feature(**common, derived=f["derived"], depends_on=deps)

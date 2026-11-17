@@ -26,19 +26,20 @@ Windowing before de-duplicating can resurrect a stale version whose valid time
 was later corrected. Ties on ``ingested_at`` break on the version column, and
 sums/averages accumulate in exact decimals, so a build is bit-for-bit
 reproducible regardless of thread scheduling.
+
+Derived features take the latest lineage timestamp of their inputs via
+``greatest(...)``, which in DuckDB skips NULLs (an input with no contributing
+rows) and is NULL only when every input is NULL.
 """
 from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
 
+from ._sql import q as _q
 from .registry import Feature, Registry, derived_layers
 
 STRATEGIES = ("naive", "event_time", "bitemporal")
-
-
-def _q(name: str) -> str:
-    return '"' + name.replace('"', '""') + '"'
 
 
 @dataclass(frozen=True)
@@ -68,15 +69,16 @@ def compile_features(
     joins = []
     for src_name, src_feats in by_source.items():
         src = registry.sources[src_name]
-        tbl = (table_for_source or {}).get(src_name, f"src_{src_name}")
+        tbl = _q((table_for_source or {}).get(src_name, f"src_{src_name}"))
+        known_cte, agg_cte = _q(f"known_{src_name}"), _q(f"agg_{src_name}")
         knowledge = (
             f"AND r.{_q(src.ingested_at)} <= sp.__as_of" if strategy == "bitemporal" else ""
         )
         partition = ", ".join(["sp.__row_id"] + [f"r.{_q(k)}" for k in src.record_key])
         ctes.append(f"""
-known_{src_name} AS (
+{known_cte} AS (
     SELECT sp.__row_id, sp.__as_of, r.*
-    FROM {spine_table} sp
+    FROM {_q(spine_table)} sp
     JOIN {tbl} r ON r.{ent} = sp.{ent} {knowledge}
     QUALIFY row_number() OVER (
         PARTITION BY {partition}
@@ -105,13 +107,13 @@ known_{src_name} AS (
             cols.append(f"max({ing}) FILTER (WHERE {flt}) AS {_q('__ing__' + f.name)}")
             cols.append(f"max({evt}) FILTER (WHERE {flt}) AS {_q('__evt__' + f.name)}")
         ctes.append(f"""
-agg_{src_name} AS (
+{agg_cte} AS (
     SELECT __row_id,
         {(','+chr(10)+'        ').join(cols)}
-    FROM known_{src_name}
+    FROM {known_cte}
     GROUP BY __row_id
 )""")
-        joins.append(f"LEFT JOIN agg_{src_name} USING (__row_id)")
+        joins.append(f"LEFT JOIN {agg_cte} USING (__row_id)")
 
     base_cols = []
     for f in feats:
@@ -125,7 +127,7 @@ agg_{src_name} AS (
 layer_0 AS (
     SELECT sp.__row_id, sp.{ent}, sp.decision_time, sp.__as_of,
         {(','+chr(10)+'        ').join(base_cols)}
-    FROM {spine_table} sp
+    FROM {_q(spine_table)} sp
     {chr(10).join('    ' + j for j in joins)}
 )""")
 

@@ -18,13 +18,14 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from ._sql import lit_str, q
 from .store import FeatureFrame, FeatureStore
 
 
 def knowledge_epochs(store: FeatureStore, decision_times: pd.Series) -> pd.Series:
     """For each decision, the timestamp of the last load at or before it."""
     parts = [
-        f'SELECT DISTINCT "{s.ingested_at}" AS t FROM src_{n}'
+        f"SELECT DISTINCT {q(s.ingested_at)} AS t FROM {q(f'src_{n}')}"
         for n, s in store.registry.sources.items()
     ]
     loads = store.con.execute(" UNION ".join(parts) + " ORDER BY t").df()["t"].values
@@ -38,6 +39,13 @@ def knowledge_epochs(store: FeatureStore, decision_times: pd.Series) -> pd.Serie
 def replay(store: FeatureStore, spine: pd.DataFrame, features: list[str] | None = None,
            purpose: str = "credit_decisioning", row_id: str = "application_id",
            progress: bool = False) -> FeatureFrame:
+    names = [f.name for f in store.registry.select(features, purpose)]
+    if spine.empty:  # nothing to replay; return a correctly-shaped empty frame
+        fr = store.build(spine, "event_time", features=names, purpose=purpose, row_id=row_id,
+                         with_manifest=False)
+        return FeatureFrame(values=fr.values, lineage=fr.lineage, features=fr.features,
+                            strategy="replay", manifest={"strategy": "replay", "knowledge_epochs": 0})
+
     sources = store.registry.sources
     ent = store.registry.entity
     tables = {n: f"trunc_{n}" for n in sources}
@@ -49,25 +57,25 @@ def replay(store: FeatureStore, spine: pd.DataFrame, features: list[str] | None 
     frames, lineages = [], []
     groups = list(spine.groupby("__epoch", sort=True))
     for i, (epoch, grp) in enumerate(groups):
-        ts = pd.Timestamp(epoch).isoformat(sep=" ")
+        ts = lit_str(pd.Timestamp(epoch).isoformat(sep=" "))
         # Rebuild each table as production held it at this epoch, for the customers
         # being scored (other customers cannot affect their features).
         store.con.register("epoch_entities", grp[[ent]].drop_duplicates())
         for n, s in sources.items():
             store._run(
-                f"CREATE OR REPLACE TEMP TABLE {tables[n]} AS "
-                f"SELECT r.* FROM src_{n} r SEMI JOIN epoch_entities e ON r.\"{ent}\" = e.\"{ent}\" "
-                f"WHERE r.\"{s.ingested_at}\" <= TIMESTAMP '{ts}'"
+                f"CREATE OR REPLACE TEMP TABLE {q(tables[n])} AS "
+                f"SELECT r.* FROM {q(f'src_{n}')} r SEMI JOIN epoch_entities e ON r.{q(ent)} = e.{q(ent)} "
+                f"WHERE r.{q(s.ingested_at)} <= TIMESTAMP {ts}"
             )
         store.con.unregister("epoch_entities")
-        fr = store.build(grp.drop(columns="__epoch"), strategy="event_time", features=features,
+        fr = store.build(grp.drop(columns="__epoch"), strategy="event_time", features=names,
                          purpose=purpose, row_id=row_id, table_for_source=tables, with_manifest=False)
         frames.append(fr.values)
         lineages.append(fr.lineage)
         if progress and (i + 1) % 50 == 0:
             print(f"  replayed {i + 1}/{len(groups)} knowledge epochs")
     for n in sources:
-        store._run(f"DROP TABLE IF EXISTS {tables[n]}")
+        store._run(f"DROP TABLE IF EXISTS {q(tables[n])}")
 
     values = pd.concat(frames, ignore_index=True).sort_values(row_id).reset_index(drop=True)
     lineage = pd.concat(lineages, ignore_index=True).sort_values(row_id).reset_index(drop=True)
@@ -92,5 +100,5 @@ def parity(a: pd.DataFrame, b: pd.DataFrame, features: list[str], row_id: str = 
         else:
             same = both_nan | (x == y)
         rows.append({"feature": f, "rows": len(m), "mismatched_rows": int((~same).sum()),
-                     "mismatch_pct": round(100 * float((~same).mean()), 2)})
+                     "mismatch_pct": round(100 * float((~same).mean()), 2) if len(m) else 0.0})
     return pd.DataFrame(rows)

@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 
 from . import config
+from ._sql import lit_str, q
 from .compiler import STRATEGIES, compile_features
 from .registry import Registry, load_registry
 
@@ -87,7 +88,16 @@ class FeatureFrame:
 
 
 class FeatureStore:
-    def __init__(self, registry_path: Path = config.REGISTRY_PATH, raw_dir: Path = config.RAW_DIR):
+    """Point-in-time feature builds over the registry's sources.
+
+    ``in_memory=True`` (default) loads each source into DuckDB once, which keeps
+    the production replay fast (it re-truncates every source per knowledge epoch).
+    ``in_memory=False`` registers lazy Parquet views instead, for sources larger
+    than RAM: builds take the same time here, but the replay is about 40% slower.
+    """
+
+    def __init__(self, registry_path: Path = config.REGISTRY_PATH, raw_dir: Path = config.RAW_DIR,
+                 in_memory: bool = True):
         self.registry: Registry = load_registry(registry_path)
         self.raw_dir = Path(raw_dir)
         self.con = duckdb.connect()
@@ -96,8 +106,9 @@ class FeatureStore:
             path = self.raw_dir / src.path
             if not path.exists():
                 raise FileNotFoundError(f"Source '{name}' expects {path}. Run `timefence generate` first.")
-            # Loaded into memory once: small enough here, and replay truncates them repeatedly.
-            self._run(f"CREATE OR REPLACE TEMP TABLE src_{name} AS SELECT * FROM read_parquet('{path.as_posix()}')")
+            kind = "TABLE" if in_memory else "VIEW"
+            self._run(f"CREATE OR REPLACE TEMP {kind} {q(f'src_{name}')} AS "
+                      f"SELECT * FROM read_parquet({lit_str(path.as_posix())})")
         self.check_sources()
 
     def _run(self, sql: str) -> None:
@@ -108,14 +119,17 @@ class FeatureStore:
     def check_sources(self) -> None:
         """Data contract: version keys unique, and no version lands before its fact."""
         for name, s in self.registry.sources.items():
-            key = ", ".join([*s.record_key, s.version_col])
+            tbl = q(f"src_{name}")
+            cols = [*s.record_key, s.version_col]
             dup = self.con.execute(
-                f"SELECT count(*) FROM (SELECT {key} FROM src_{name} GROUP BY ALL HAVING count(*) > 1)"
+                f"SELECT count(*) FROM (SELECT {', '.join(map(q, cols))} FROM {tbl} "
+                "GROUP BY ALL HAVING count(*) > 1)"
             ).fetchall()[0][0]
             if dup:
-                raise ValueError(f"Source '{name}': {dup} duplicate ({key}) keys; tie-breaking would be undefined")
+                raise ValueError(f"Source '{name}': {dup} duplicate ({', '.join(cols)}) keys; "
+                                 "tie-breaking would be undefined")
             early = self.con.execute(
-                f'SELECT count(*) FROM src_{name} WHERE "{s.ingested_at}" < "{s.event_time}"'
+                f"SELECT count(*) FROM {tbl} WHERE {q(s.ingested_at)} < {q(s.event_time)}"
             ).fetchall()[0][0]
             if early:
                 raise ValueError(f"Source '{name}': {early} rows ingested before they happened")
